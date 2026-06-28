@@ -3,6 +3,11 @@
 - [Global Prefix](#global-prefix)
 - [ValidationPipe Global](#validationpipe-global)
 - [Archivos Estaticos](#archivos-estaticos)
+- [Configuracion de Variables de Entorno](#configuracion-de-variables-de-entorno)
+  - [@nestjs/config](#nestjs-config)
+  - [env.config.ts](#envconfigts)
+  - [joi.validation.ts](#joivalidationts)
+  - [.env](#env)
 - [MongoDB](#mongodb)
   - [docker-compose.yaml](#docker-composeyaml)
   - [Conectar mongo con nest](#conectar-mongo-con-nest)
@@ -50,6 +55,7 @@ async function main() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api/v2')
   await app.listen(process.env.PORT ?? 3000);
+  console.log(`App running on port ${process.env.PORT}`)
 }
 main();
 ```
@@ -100,6 +106,93 @@ export class AppModule {}
 
 * `ServeStaticModule.forRoot()`: Recibe la ruta de la carpeta publica
 * `join(__dirname, '..', 'public')`: `__dirname` apunta a `dist/`, entonces subimos un nivel y entramos a `public/`
+
+# Configuracion de Variables de Entorno
+
+## @nestjs/config
+
+NestJS provee el modulo `@nestjs/config` para manejar variables de entorno de forma sencilla.
+
+```
+$ npm i @nestjs/config
+```
+
+`ConfigModule.forRoot()` carga automaticamente las variables desde un archivo `.env` en la raiz del proyecto y las expone a traves de `process.env`.
+
+```ts
+import { ConfigModule } from '@nestjs/config';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      load: [ EnvConfiguration ],
+      validationSchema: JoiValidationSchema
+    }),
+  ]
+})
+export class AppModule {}
+```
+
+* `ConfigModule.forRoot()`: Inicializa el modulo de configuracion. Busca un archivo `.env` en la raiz por defecto
+* `load`: Recibe un arreglo de funciones que definen valores por defecto y mapeo de variables
+* `validationSchema`: Recibe un schema de Joi para validar tipos y valores requeridos
+
+## env.config.ts
+
+Archivo que exporta una funcion con los valores por defecto de las variables de entorno.
+
+```ts
+export const EnvConfiguration = () => ({
+    environment: process.env.NODE_ENV || 'dev',
+    mongodb: process.env.MONGODB,
+    port: process.env.PORT || 3002,
+    defaultLimit: +(process.env.DEFAULT_LIMIT || 7),
+})
+```
+
+* `process.env.VARIABLE`: Lee el valor desde las variables de entorno del sistema o del archivo `.env`
+* `|| 'dev'`: Operador OR que asigna un valor por defecto si la variable no esta definida
+* `+(...)`: El operador `+` convierte el string a numero (ej: `'7'` -> `7`)
+* Esta funcion se pasa al arreglo `load` de `ConfigModule.forRoot()`
+
+## joi.validation.ts
+
+Archivo que define un schema de Joi para validar que las variables de entorno tengan los tipos correctos y valores requeridos.
+
+```ts
+import Joi from "joi";
+
+export const JoiValidationSchema = Joi.object({
+    MONGODB: Joi.required(),
+    PORT: Joi.number().default(3005),
+    DEFAULT_LIMIT: Joi.number().default(6)
+})
+```
+
+```
+$ npm i joi
+```
+
+* `Joi.object()`: Crea un schema de validacion para un objeto
+* `Joi.required()`: La variable es obligatoria, si no existe lanza un error al iniciar la app
+* `Joi.number()`: Valida que el valor sea un numero
+* `.default(3005)`: Si la variable no esta definida, asigna este valor por defecto (tiene menor prioridad que `env.config.ts`)
+
+> **Orden de prioridad**: Las variables del archivo `.env` tienen la maxima prioridad, luego los defaults de `env.config.ts`, y por ultimo los defaults de Joi.
+
+## .env
+
+Archivo en la raiz del proyecto donde se definen las variables de entorno. No se sube al repositorio (esta en `.gitignore`).
+
+```
+MONGODB=mongodb://localhost:27017/nest-pokemon
+PORT=3000
+DEFAULT_LIMIT=10
+```
+
+* Cada linea tiene el formato `CLAVE=valor` sin espacios alrededor del `=`
+* Las variables se cargan automaticamente al llamar `ConfigModule.forRoot()`
+* Los valores se acceden mediante `process.env.CLAVE` en cualquier parte de la app
 
 # MongoDB
 
@@ -155,17 +248,26 @@ export class AppModule {}
 
 ```ts
 import { Module } from '@nestjs/common';
-import { ServeStaticModule } from '@nestjs/serve-static';
-import { join } from 'path';
-import { PokemonModule } from './pokemon/pokemon.module';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { ConfigModule } from '@nestjs/config';
+
+import { join } from 'path';
+
+import { PokemonModule } from './pokemon/pokemon.module';
 import { CommonModule } from './common/common.module';
 import { SeedModule } from './seed/seed.module';
+import { EnvConfiguration } from './config/env.config';
+import { JoiValidationSchema } from './config/joi.validation';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      load: [ EnvConfiguration ],
+      validationSchema: JoiValidationSchema
+    }),
     ServeStaticModule.forRoot({ rootPath: join(__dirname, '..', 'public') }),
-    MongooseModule.forRoot('mongodb://localhost:27017/nest-pokemon'),
+    MongooseModule.forRoot(process.env.MONGODB as string),
     PokemonModule,
     CommonModule,
     SeedModule
