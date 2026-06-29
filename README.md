@@ -3,13 +3,18 @@
 - [Global Prefix](#global-prefix)
 - [ValidationPipe Global](#validationpipe-global)
 - [Archivos Estaticos](#archivos-estaticos)
+- [Docker](#docker)
+  - [Dockerfile](#dockerfile)
+  - [Dockerfile.template](#dockerfiletemplate)
+  - [docker-compose.prod.yaml](#docker-composeprodyaml)
+  - [.dockerignore](#dockerignore)
 - [Configuracion de Variables de Entorno](#configuracion-de-variables-de-entorno)
   - [@nestjs/config](#nestjs-config)
   - [env.config.ts](#envconfigts)
   - [joi.validation.ts](#joivalidationts)
   - [.env](#env)
 - [MongoDB](#mongodb)
-  - [docker-compose.yaml](#docker-composeyaml)
+  - [docker-compose.yaml (desarrollo)](#docker-composeyaml-desarrollo)
   - [Conectar mongo con nest](#conectar-mongo-con-nest)
   - [Inyectar modelos](#inyectar-modelos)
   - [AppModule completo](#appmodule-completo)
@@ -107,6 +112,126 @@ export class AppModule {}
 * `ServeStaticModule.forRoot()`: Recibe la ruta de la carpeta publica
 * `join(__dirname, '..', 'public')`: `__dirname` apunta a `dist/`, entonces subimos un nivel y entramos a `public/`
 
+# Docker
+
+## Dockerfile
+
+Dockerfile multi-etapa (multi-stage build) que compila la app de NestJS y genera una imagen de produccion ligera.
+
+```dockerfile
+FROM node:24-alpine AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
+
+FROM node:24-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN yarn build
+
+FROM node:24-alpine AS runner
+WORKDIR /usr/src/app
+COPY package.json yarn.lock ./
+RUN yarn install --prod
+COPY --from=builder /app/dist ./dist
+CMD [ "node","dist/main" ]
+```
+
+* **Primera etapa `deps`**: Instala todas las dependencias (dev + prod) usando `yarn install --frozen-lockfile` para asegurar que se use exactamente el `yarn.lock`
+* `libc6-compat`: Paquete necesario para compatibilidad en Alpine con algunas librerias de Node
+* **Segunda etapa `builder`**: Copia los `node_modules` desde `deps` (evita reinstalar) y ejecuta `yarn build` para compilar TypeScript a JavaScript en `dist/`
+* **Tercera etapa `runner`**: Imagen final mas liviana. Solo instala dependencias de produccion con `yarn install --prod`, copia el `dist/` desde `builder`, y ejecuta `node dist/main`
+* `COPY --from=deps` y `COPY --from=builder`: Copian archivos desde etapas anteriores del mismo Dockerfile
+
+## Dockerfile.template
+
+Version alternativa de una sola etapa (single-stage) usando Node 18 Alpine.
+
+```dockerfile
+FROM node:18-alpine3.15
+RUN mkdir -p /var/www/pokedex
+WORKDIR /var/www/pokedex
+COPY . ./var/www/pokedex
+COPY package.json tsconfig.json tsconfig.build.json /var/www/pokedex/
+RUN yarn install --prod
+RUN yarn build
+RUN adduser --disabled-password pokeuser
+RUN chown -R pokeuser:pokeuser /var/www/pokedex
+USER pokeuser
+RUN yarn cache clean --force
+EXPOSE 3000
+CMD [ "yarn","start" ]
+```
+
+* **Single-stage**: Todo en una sola imagen, mas simple pero mas pesada que la multi-etapa
+* `adduser --disabled-password pokeuser`: Crea un usuario no-root para ejecutar la app por seguridad
+* `USER pokeuser`: Cambia al usuario no-root para que la app no corra como root
+* `EXPOSE 3000`: Solo es documentacion, no expone el puerto realmente (eso se hace en docker-compose o con `-p`)
+* `yarn cache clean --force`: Limpia el cache de yarn para reducir el tamano de la imagen
+
+## docker-compose.prod.yaml
+
+Archivo de docker-compose para entorno de produccion que levanta la app y la base de datos.
+
+```yaml
+version: '3'
+
+services:
+  pokedexapp:
+    depends_on:
+      - db
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pokedex-docker
+    container_name: pokedexapp
+    restart: always
+    ports:
+      - "${PORT}:${PORT}"
+    environment:
+      MONGODB: ${MONGODB}
+      PORT: ${PORT}
+      DEFAULT_LIMIT: ${DEFAULT_LIMIT}
+
+  db:
+    image: mongo:5
+    container_name: mongo-poke
+    restart: always
+    ports:
+      - 27017:27017
+    environment:
+      MONGODB_DATABASE: nest-pokemon
+    volumes:
+      - ./mongo:/data/db
+```
+
+* **`pokedexapp`**: Construye la imagen usando el `Dockerfile` (multi-etapa) y la etiqueta como `pokedex-docker`
+* `depends_on`: Garantiza que el servicio `db` se inicie antes que `pokedexapp`
+* `restart: always`: Reinicia automaticamente el contenedor si se detiene o crashea
+* `environment`: Las variables `${MONGODB}`, `${PORT}`, `${DEFAULT_LIMIT}` se toman del archivo `.env` en la raiz del proyecto
+* **`db`**: Servicio de MongoDB 5 con volumen persistente en `./mongo:/data/db`
+
+## .dockerignore
+
+Archivo que excluye directorios y archivos del contexto de build de Docker para que no se copien a la imagen.
+
+```
+dist/
+node_modules/
+.gitignore
+.git/
+```
+
+* `dist/`: Se genera dentro del Dockerfile en la etapa `builder`, no necesita venir del host
+* `node_modules/`: Se instalan dentro del Dockerfile, traerlos del host podria causar incompatibilidades
+* `.git/` y `.gitignore`: Archivos de control de versiones innecesarios en la imagen
+
+## docker-compose.yaml (desarrollo)
+
+> Este archivo ya esta documentado en la seccion de [MongoDB > docker-compose.yaml](#docker-composeyaml). Se usa unicamente para levantar la base de datos en desarrollo. Para produccion usar `docker-compose.prod.yaml`.
+
 # Configuracion de Variables de Entorno
 
 ## @nestjs/config
@@ -196,9 +321,9 @@ DEFAULT_LIMIT=10
 
 # MongoDB
 
-## docker-compose.yaml
+## docker-compose.yaml (desarrollo)
 
-Se crea el archivo .yaml para crear el entorno en el que estara nuestra base de datos mongo
+Se crea el archivo .yaml para crear el entorno de base de datos mongo en desarrollo. Solo levanta MongoDB, la app NestJS corre en el host con `npm run start:dev`.
 
 ```yaml
 version: '3'
